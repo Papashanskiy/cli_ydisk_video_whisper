@@ -13,6 +13,9 @@ from argparse import ArgumentParser
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 TMP_DIR = os.path.join(PROJECT_ROOT, "tmp")
 
+VIDEO_PATH = None
+AUDIO_PATH = None
+
 
 def parse_args():
     parser = ArgumentParser()
@@ -35,6 +38,8 @@ def download_video(disk_token, url):
         timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S_%f")
         filename = f"video_{timestamp}.mov"
         filepath = os.path.join(TMP_DIR, filename)
+        global VIDEO_PATH
+        VIDEO_PATH = filepath
         print(f"temp file name: {filepath}")
 
         disk_client.download_by_link(url, filepath)
@@ -51,6 +56,9 @@ def video_to_audio(filepath):
     filename = f"audio_{timestamp}.mp3"
     audio_path = os.path.join(TMP_DIR, filename)
     
+    global AUDIO_PATH
+    AUDIO_PATH = audio_path
+
     audio.write_audiofile(audio_path)
     audio.close()
     video.close()
@@ -106,6 +114,7 @@ def main():
 
         remove_temp_files(video_path, audio_path)
     except Exception as e:
+        remove_temp_files(VIDEO_PATH, AUDIO_PATH)
         print(f"Произошла ошибка: {e}")
         print(traceback.format_exc())
         raise

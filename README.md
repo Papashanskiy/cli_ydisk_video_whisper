@@ -49,7 +49,7 @@ Run the application with your Yandex Disk token:
 python app/main.py --disk_token YOUR_TOKEN_HERE
 ```
 
-The application will prompt you to enter the Yandex Disk video URL. After processing, it will display the transcription and automatically clean up temporary files.
+The application will prompt you to enter the Yandex Disk video PATH. After processing, it will display the transcription and automatically clean up temporary files.
 
 ## How It Works
 

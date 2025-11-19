@@ -1,15 +1,16 @@
+import io
 import os
 import time
 import traceback
 import yadisk
 import datetime
 import whisper
+import mimetypes
 
 from moviepy import VideoFileClip
 from argparse import ArgumentParser
 
 
-# Получаем корневую директорию проекта (на уровень выше app/)
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 TMP_DIR = os.path.join(PROJECT_ROOT, "tmp")
 
@@ -19,22 +20,51 @@ AUDIO_PATH = None
 
 def parse_args():
     parser = ArgumentParser()
-    # parser.add_argument('--url', required=True, help='URL для скачивания видео с Яндекс.Диска')
-    parser.add_argument('--disk_token', required=True, help='Токен доступа к Яндекс.Диску')
+    parser.add_argument('--disk_token', required=True)
     return parser.parse_args()
 
 
 def ensure_tmp_dir():
-    """Создает папку tmp если её нет"""
     print(f"[INFO] Ensuring temporary directory exists: {TMP_DIR}")
     os.makedirs(TMP_DIR, exist_ok=True)
     print(f"[INFO] Temporary directory ready")
 
 
-def download_video(disk_token, url):
-    print(f"[STEP 1/3] Starting video download from Yandex Disk...")
-    print(f"[INFO] Video URL: {url}")
+def validate_video_file(filepath):
+    """Validates that the downloaded file is actually a video file"""
+    if not os.path.exists(filepath):
+        raise FileNotFoundError(f"Downloaded file does not exist: {filepath}")
     
+    file_size = os.path.getsize(filepath)
+    print(f"[INFO] Downloaded file size: {file_size} bytes")
+    
+    if file_size == 0:
+        raise ValueError("Downloaded file is empty. The file may not have been downloaded correctly.")
+    
+    # Check if file is suspiciously small (likely HTML error page)
+    if file_size < 1024:  # Less than 1KB is suspicious for a video
+        print(f"[WARNING] File size is very small ({file_size} bytes). This might be an error page.")
+        # Try to read first few bytes to check if it's HTML
+        try:
+            with open(filepath, 'rb') as f:
+                first_bytes = f.read(100)
+                if b'<html' in first_bytes.lower() or b'<!doctype' in first_bytes.lower():
+                    raise ValueError("Downloaded file appears to be an HTML page, not a video file. Please check the file path and permissions.")
+        except Exception:
+            pass
+    
+    # Check MIME type
+    mime_type, _ = mimetypes.guess_type(filepath)
+    if mime_type and not mime_type.startswith('video/'):
+        print(f"[WARNING] File MIME type is {mime_type}, expected video/*")
+    
+    print(f"[INFO] File validation passed")
+
+
+def download_video(disk_token, _path):
+    print(f"[STEP 1/3] Starting video download from Yandex Disk...")
+    print(f"[INFO] Input: {_path}")
+
     disk_client = yadisk.Client(token=disk_token)
 
     with disk_client:
@@ -43,18 +73,33 @@ def download_video(disk_token, url):
         
         if not is_valid:
             raise Exception("Invalid Yandex Disk token")
+
+        file_path = _path
+        print("[INFO] Disk info:", disk_client.get_disk_info())
         
-        # Используем timestamp для уникальности имени файла
+        # Check if file exists on disk
+        print(f"[INFO] Checking if file exists on Yandex Disk: {file_path}")
+        if not disk_client.exists(file_path):
+            raise FileNotFoundError(f"File not found on Yandex Disk: {file_path}")
+        # Get file info
+        file_info = disk_client.get_meta(file_path)
+        print(f"[INFO] File found: {file_info.name} ({file_info.size} bytes)")
+        
+        # Determine file extension from original file
+        original_ext = os.path.splitext(file_info.name)[1] or '.mov'
         timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S_%f")
-        filename = f"video_{timestamp}.mov"
+        filename = f"video_{timestamp}{original_ext}"
         filepath = os.path.join(TMP_DIR, filename)
         global VIDEO_PATH
         VIDEO_PATH = filepath
         print(f"[INFO] Temporary video file: {filepath}")
 
         print(f"[INFO] Downloading video...")
-        disk_client.download_by_link(url, filepath)
+        disk_client.download(file_path, filepath)
         print(f"[SUCCESS] Video downloaded successfully")
+        
+        # Validate the downloaded file
+        validate_video_file(filepath)
 
     return filepath
 
@@ -99,27 +144,44 @@ def audio_to_text(audio_path):
     return result["text"]
 
 
+def upload_transcription_to_yandex_disk(disk_token, disk_video_file_path, transcription):
+    print(f"[STEP 4/4] Uploading transcription to Yandex Disk...")
+    print(f"[INFO] Loading Yandex Disk client...")
+    disk_client = yadisk.Client(token=disk_token)
+    with disk_client:
+        print(f"[INFO] Yandex Disk client loaded. Starting upload...")
+        transcription_file = io.StringIO(transcription)
+        transcription_file_path = os.path.join(
+            disk_video_file_path.split('/')[:-1], 
+            f"transcription_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S_%f')}.txt"
+        )
+        disk_client.upload(transcription_file, transcription_file_path)
+        print(f"[SUCCESS] Transcription uploaded successfully")
+
+
 def remove_temp_files(video_path, audio_path):
     """Удаляет временные файлы с проверкой их существования"""
     print(f"[CLEANUP] Removing temporary files...")
     
-    try:
-        if os.path.exists(video_path):
-            os.remove(video_path)
-            print(f"[CLEANUP] Removed temporary video file: {video_path}")
-        else:
-            print(f"[CLEANUP] Video file not found (may have been already removed)")
-    except OSError as e:
-        print(f"[WARNING] Error removing video file: {e}")
+    if video_path:
+        try:
+            if os.path.exists(video_path):
+                os.remove(video_path)
+                print(f"[CLEANUP] Removed temporary video file: {video_path}")
+            else:
+                print(f"[CLEANUP] Video file not found (may have been already removed)")
+        except (OSError, TypeError) as e:
+            print(f"[WARNING] Error removing video file: {e}")
     
-    try:
-        if os.path.exists(audio_path):
-            os.remove(audio_path)
-            print(f"[CLEANUP] Removed temporary audio file: {audio_path}")
-        else:
-            print(f"[CLEANUP] Audio file not found (may have been already removed)")
-    except OSError as e:
-        print(f"[WARNING] Error removing audio file: {e}")
+    if audio_path:
+        try:
+            if os.path.exists(audio_path):
+                os.remove(audio_path)
+                print(f"[CLEANUP] Removed temporary audio file: {audio_path}")
+            else:
+                print(f"[CLEANUP] Audio file not found (may have been already removed)")
+        except (OSError, TypeError) as e:
+            print(f"[WARNING] Error removing audio file: {e}")
     
     print(f"[CLEANUP] Cleanup completed")
 
@@ -132,7 +194,7 @@ def main():
     args = parse_args()
     print(f"[INFO] Yandex Disk token provided")
 
-    url = input("Enter video URL from Yandex Disk: ")
+    disk_video_file_path = input("Enter file path from Yandex Disk (e.g., /folder/video.mov): ")
     print()
 
     start_time = time.time()
@@ -142,7 +204,7 @@ def main():
     print()
 
     try:
-        video_path = download_video(args.disk_token, url)
+        video_path = download_video(args.disk_token, disk_video_file_path)
         print()
         
         audio_path = video_to_audio(video_path)
@@ -150,6 +212,8 @@ def main():
         
         transcription = audio_to_text(audio_path)
         print()
+
+        upload_transcription_to_yandex_disk(args.disk_token, disk_video_file_path, transcription)
 
         print("=" * 60)
         print("TRANSCRIPTION RESULT:")
